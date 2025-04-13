@@ -1,0 +1,27 @@
+
+=============================================
+     QQQ ORB Trading Strategy Summary
+=============================================
+
+Trading Period: 2022-01-22 to 2023-02-23
+Initial Capital: $25000.00
+Final Capital: $33960.69
+
+---------------------------------------------
+            Trading Statistics
+---------------------------------------------
+Total Trades: 273
+Profitable Trades: 67
+Win Rate: 24.54%
+
+Total P&L: $8960.69 (35.84%)
+Average P&L in Risk Units (R): 0.15R
+
+---------------------------------------------
+          Exit Reason Analysis
+---------------------------------------------
+End of Day: 62 trades, Total P&L: $60072.55, Avg P&L: $968.91, Avg R: 2.98R
+Stop Loss: 205 trades, Total P&L: $-64382.97, Avg P&L: $-314.06, Avg R: -1.00R
+Take Profit: 6 trades, Total P&L: $13271.11, Avg P&L: $2211.85, Avg R: 10.00R
+
+=============================================

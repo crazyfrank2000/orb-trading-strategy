@@ -1,0 +1,27 @@
+
+=============================================
+     TQQQ ORB Trading Strategy Summary
+=============================================
+
+Trading Period: 2025-01-01 to 2025-04-11
+Initial Capital: $25000.00
+Final Capital: $32171.11
+
+---------------------------------------------
+            Trading Statistics
+---------------------------------------------
+Total Trades: 68
+Profitable Trades: 20
+Win Rate: 29.41%
+
+Total P&L: $7171.11 (28.68%)
+Average P&L in Risk Units (R): 0.44R
+
+---------------------------------------------
+          Exit Reason Analysis
+---------------------------------------------
+End of Day: 17 trades, Total P&L: $13263.98, Avg P&L: $780.23, Avg R: 2.80R
+Stop Loss: 48 trades, Total P&L: $-14057.23, Avg P&L: $-292.86, Avg R: -1.00R
+Take Profit: 3 trades, Total P&L: $7964.35, Avg P&L: $2654.78, Avg R: 10.00R
+
+=============================================
