@@ -24,7 +24,7 @@ An implementation of the Opening Range Breakout (ORB) trading strategy in Python
 Clone the repository and install dependencies:
 
 ```bash
-git clone https://github.com/yourusername/orb-trading-strategy.git
+git clone https://github.com/crazyfrank2000/orb-trading-strategy.git
 cd orb-trading-strategy
 pip install -r requirements.txt
 ```
