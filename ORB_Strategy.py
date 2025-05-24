@@ -74,8 +74,12 @@ class ORB_Trading_Strategy:
         """从IBKR获取5分钟数据"""
         try:
             # 尝试导入数据获取模块
-            spec = importlib.util.find_spec('ibkr_5min_data_fetcher')
-            if spec is None:
+            try:
+                spec = importlib.util.find_spec('ibkr_5min_data_fetcher')
+                if spec is None:
+                    raise ImportError("Module not found in path")
+                ibkr_fetcher = importlib.import_module('ibkr_5min_data_fetcher')
+            except ImportError:
                 print("未找到ibkr_5min_data_fetcher模块，尝试从当前目录加载")
                 
                 # 如果模块不在路径中，尝试从当前目录加载
@@ -85,8 +89,6 @@ class ORB_Trading_Strategy:
                     spec.loader.exec_module(ibkr_fetcher)
                 else:
                     raise ImportError("无法找到ibkr_5min_data_fetcher.py文件")
-            else:
-                ibkr_fetcher = importlib.import_module('ibkr_5min_data_fetcher')
             
             print(f"正在从IBKR获取 {self.symbol} 的5分钟数据...")
             
@@ -98,11 +100,11 @@ class ORB_Trading_Strategy:
                 config.DATA_DIR
             )
             
-            if result and result['full_data']['success']:
+            if result and isinstance(result, dict) and 'full_data' in result and result['full_data']['success']:
                 print(f"成功获取 {self.symbol} 的5分钟数据：{result['full_data']['rows']} 行")
                 return True
             else:
-                error_msg = result['full_data']['error'] if result and 'full_data' in result else "未知错误"
+                error_msg = result.get('full_data', {}).get('error', "未知错误") if result and isinstance(result, dict) else "未知错误"
                 print(f"数据获取失败: {error_msg}")
                 return False
                 
@@ -193,9 +195,13 @@ class ORB_Trading_Strategy:
             return
         
         # 检查相邻交易日的间隔
-        date_diffs = [(trade_dates[i+1] - trade_dates[i]).days for i in range(len(trade_dates)-1)]
-        max_gap = max(date_diffs)
-        avg_gap = sum(date_diffs) / len(date_diffs)
+        if len(trade_dates) > 1:
+            date_diffs = [(trade_dates[i+1] - trade_dates[i]).days for i in range(len(trade_dates)-1)]
+            max_gap = max(date_diffs)
+            avg_gap = sum(date_diffs) / len(date_diffs)
+        else:
+            max_gap = 0
+            avg_gap = 0
         
         print(f"交易日期范围: {trade_dates[0]} 至 {trade_dates[-1]}")
         print(f"总交易日数: {len(trade_dates)}")
@@ -215,7 +221,7 @@ class ORB_Trading_Strategy:
         print(f"最少K线数: {min_bars} (日期: {bars_per_day.idxmin()})")
         print(f"最多K线数: {max_bars} (日期: {bars_per_day.idxmax()})")
         
-        if min_bars < 50:  # 假设正常交易日至少应有70多根5分钟K线
+        if min_bars < 50:  # 假设正常交易日至少应有50根5分钟K线
             print(f"警告: 某些交易日K线数量异常少 ({min_bars})，可能数据不完整")
         
         # 返回是否通过验证
@@ -331,6 +337,9 @@ class ORB_Trading_Strategy:
             pnl_pct = trade_pnl / self.current_capital
             pnl_in_r = ((exit_price - entry_price) * direction) / risk
             
+            # 记录交易前资金
+            capital_before = self.current_capital
+            
             # 记录交易
             trade = {
                 'date': day_data.iloc[0]['date'],
@@ -348,7 +357,9 @@ class ORB_Trading_Strategy:
                 'commission': commission,
                 'pnl': trade_pnl,
                 'pnl_pct': pnl_pct,
-                'pnl_in_r': pnl_in_r
+                'pnl_in_r': pnl_in_r,
+                'capital_before': capital_before,
+                'capital_after': capital_before + trade_pnl
             }
             
             # 更新账户资金
@@ -651,20 +662,21 @@ class ORB_Trading_Strategy:
         
         # 自动调整列宽
         for sheet in [summary_sheet, trades_sheet]:
-            for col in sheet.columns:
+            for column_cells in sheet.columns:
                 max_length = 0
                 # 获取列字母，避免使用合并单元格
-                column = get_column_letter(col[0].column)
-                for cell in col:
+                column = get_column_letter(column_cells[0].column)
+                for cell in column_cells:
                     # 跳过合并单元格
-                    if isinstance(cell, openpyxl.cell.cell.MergedCell):
+                    try:
+                        if hasattr(cell, '_value') and cell._value is not None:
+                            cell_length = len(str(cell.value))
+                            if cell_length > max_length:
+                                max_length = cell_length
+                    except (AttributeError, TypeError):
                         continue
-                    if cell.value:
-                        cell_length = len(str(cell.value))
-                        if cell_length > max_length:
-                            max_length = cell_length
                 
-                adjusted_width = (max_length + 2)
+                adjusted_width = min(max_length + 2, 50)  # 限制最大宽度
                 sheet.column_dimensions[column].width = adjusted_width
         
         # 创建资金曲线工作表
@@ -764,7 +776,8 @@ class ORB_Trading_Strategy:
                 
                 # 获取每天的收盘价
                 daily_close = market_data.groupby('trade_date')['close'].last().reset_index()
-                daily_close['date'] = pd.to_datetime(daily_close['trade_date'])
+                daily_close['date'] = pd.to_datetime(daily_close['trade_date'], errors='coerce')
+                daily_close = daily_close.dropna(subset=['date'])  # 移除无效日期
                 daily_close = daily_close.sort_values('date')  # 确保按日期排序
                 daily_close = daily_close.set_index('date')
                 
@@ -789,7 +802,12 @@ class ORB_Trading_Strategy:
                     equity_df = combined_df[['equity', 'close']]
                 except Exception as e:
                     print(f"合并数据时出错: {str(e)}")
-                    # 使用备选方法
+                    # 使用备选方法：直接合并
+                    equity_df['close'] = np.nan
+                    for date in equity_df.index:
+                        closest_date = daily_close.index[daily_close.index <= date]
+                        if len(closest_date) > 0:
+                            equity_df.loc[date, 'close'] = daily_close.loc[closest_date[-1], 'close']
                     
                 # 前向填充收盘价的缺失值
                 equity_df['close'] = equity_df['close'].ffill()
@@ -827,14 +845,16 @@ class ORB_Trading_Strategy:
                         equity_sheet[f'B{i}'] = row['equity']
                     else:
                         # 如果没有数据，使用前一天的值或初始资金
-                        equity_sheet[f'B{i}'] = self.initial_capital if i == 2 else equity_sheet[f'B{i-1}'].value
+                        prev_value = equity_sheet[f'B{i-1}'].value if i > 2 else self.initial_capital
+                        equity_sheet[f'B{i}'] = prev_value
                     
                     # Buy & Hold 值
                     if 'buy_hold' in row and pd.notna(row['buy_hold']):
                         equity_sheet[f'C{i}'] = row['buy_hold']
                     else:
                         # 如果没有数据，使用前一天的值或初始资金
-                        equity_sheet[f'C{i}'] = self.initial_capital if i == 2 else equity_sheet[f'C{i-1}'].value
+                        prev_value = equity_sheet[f'C{i-1}'].value if i > 2 else self.initial_capital
+                        equity_sheet[f'C{i}'] = prev_value
                     
                     # 计算相对表现 (ORB vs Buy & Hold)
                     try:
@@ -892,58 +912,86 @@ class ORB_Trading_Strategy:
         
         return save_path
     
-    def generate_summary_report(self, save_path=None):
-        """生成摘要报告"""
+    def generate_csv_log(self, save_path=None):
+        """生成CSV交易日志"""
         if not self.trading_results:
             print("没有交易结果，请先运行策略")
             return
         
         if save_path is None:
-            output_dir = f"{config.OUTPUT_DIR}/{self.symbol}"
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            save_path = f"{output_dir}/{self.symbol}_ORB_Summary.txt"
+            # 创建log目录
+            log_dir = "log"
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            
+            # 生成带时间戳的文件名
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = f"{log_dir}/{self.symbol}_trades_{timestamp}.csv"
         
-        report = f"""
-=============================================
-     {self.symbol} ORB Trading Strategy Summary
-=============================================
-
-Trading Period: {self.start_date} to {self.end_date}
-Initial Capital: ${self.initial_capital:.2f}
-Final Capital: ${self.trading_results['final_capital']:.2f}
-
----------------------------------------------
-            Trading Statistics
----------------------------------------------
-Total Trades: {self.trading_results['total_trades']}
-Profitable Trades: {self.trading_results['profitable_trades']}
-Win Rate: {self.trading_results['win_rate']:.2%}
-
-Total P&L: ${self.trading_results['total_pnl']:.2f} ({self.trading_results['total_pnl_pct']:.2%})
-Average P&L in Risk Units (R): {self.trading_results['avg_pnl_in_r']:.2f}R
-
----------------------------------------------
-          Exit Reason Analysis
----------------------------------------------
-"""
+        # 准备CSV数据
+        trades_df = self.trading_results['trades'].copy()
         
-        # 添加出场原因统计
-        exit_stats = self.trading_results['exit_reason_stats']
-        for exit_reason, stats in exit_stats.iterrows():
-            report += f"{exit_reason}: {int(stats[('pnl', 'count')])} trades, "
-            report += f"Total P&L: ${stats[('pnl', 'sum')]:.2f}, "
-            report += f"Avg P&L: ${stats[('pnl', 'mean')]:.2f}, "
-            report += f"Avg R: {stats[('pnl_in_r', 'mean')]:.2f}R\n"
+        # 转换时间格式为东部时间显示
+        def convert_to_et_time(dt):
+            """将UTC时间转换为东部时间显示"""
+            if pd.isna(dt):
+                return ''
+            try:
+                if isinstance(dt, str):
+                    dt = pd.to_datetime(dt)
+                
+                # 假设输入是UTC时间，转换为东部时间
+                if dt.tz is None:
+                    dt = dt.tz_localize('UTC')
+                
+                et_time = dt.tz_convert('US/Eastern')
+                return et_time.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception as e:
+                print(f"时间转换错误: {str(e)}")
+                return str(dt)
         
-        report += "\n=============================================\n"
+                 # 格式化数据
+        csv_data = []
+        for _, trade in trades_df.iterrows():
+            csv_row = {
+                '交易日期': convert_to_et_time(trade['date']).split(' ')[0],
+                '入场时间': convert_to_et_time(trade['entry_time']).split(' ')[1] if ' ' in convert_to_et_time(trade['entry_time']) else convert_to_et_time(trade['entry_time']),
+                '出场时间': convert_to_et_time(trade['exit_time']).split(' ')[1] if ' ' in convert_to_et_time(trade['exit_time']) else convert_to_et_time(trade['exit_time']),
+                '方向': '多头' if trade['direction'] == 1 else '空头',
+                '入场价格': f"{trade['entry_price']:.2f}",
+                '止损价格': f"{trade['stop_loss']:.2f}",
+                '止盈价格': f"{trade['take_profit']:.2f}",
+                '出场价格': f"{trade['exit_price']:.2f}",
+                '出场原因': trade['exit_reason'],
+                '持仓数量': trade['shares'],
+                '交易前资金': f"{trade['capital_before']:.2f}",
+                '交易后资金': f"{trade['capital_after']:.2f}",
+                '风险金额': f"{trade['risk_amount']:.2f}",
+                '风险点数': f"{trade['risk_in_points']:.4f}",
+                '佣金': f"{trade['commission']:.2f}",
+                '盈亏金额': f"{trade['pnl']:.2f}",
+                '盈亏百分比': f"{trade['pnl_pct']:.4f}",
+                '盈亏R倍数': f"{trade['pnl_in_r']:.2f}"
+            }
+            csv_data.append(csv_row)
         
-        # 保存报告
-        with open(save_path, 'w') as f:
-            f.write(report)
+        # 转换为DataFrame并保存
+        csv_df = pd.DataFrame(csv_data)
+        csv_df.to_csv(save_path, index=False, encoding='utf-8-sig')  # 使用utf-8-sig支持中文
         
-        print(f"摘要报告已保存至: {save_path}")
-        return report
+        print(f"CSV交易日志已保存至: {save_path}")
+        
+        # 打印简要统计信息
+        print(f"\n=== {self.symbol} ORB策略交易摘要 ===")
+        print(f"交易周期: {self.start_date} 至 {self.end_date}")
+        print(f"总交易次数: {self.trading_results['total_trades']}")
+        print(f"盈利交易: {self.trading_results['profitable_trades']} ({self.trading_results['win_rate']:.2%})")
+        print(f"总盈亏: ${self.trading_results['total_pnl']:.2f} ({self.trading_results['total_pnl_pct']:.2%})")
+        print(f"平均盈亏(R): {self.trading_results['avg_pnl_in_r']:.2f}R")
+        print(f"初始资金: ${self.initial_capital:.2f}")
+        print(f"最终资金: ${self.trading_results['final_capital']:.2f}")
+        
+        return save_path
 
 
 def run_trading_strategy(symbol, start_date=None, end_date=None, initial_capital=None):
@@ -953,30 +1001,18 @@ def run_trading_strategy(symbol, start_date=None, end_date=None, initial_capital
     end_date = end_date or config.END_DATE
     initial_capital = initial_capital or config.INITIAL_CAPITAL
     
-    # 创建输出目录
-    output_dir = f"{config.OUTPUT_DIR}/{symbol}"
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
     try:
         # 创建并运行ORB交易策略
         strategy = ORB_Trading_Strategy(symbol, start_date, end_date, initial_capital)
         results = strategy.run_strategy()
         
-        # 生成Excel报告
-        excel_path = f"{output_dir}/{symbol}_ORB_Trading_Results.xlsx"
-        strategy.generate_excel_report(save_path=excel_path)
-        
-        # 生成摘要报告
-        summary_path = f"{output_dir}/{symbol}_ORB_Summary.txt"
-        summary = strategy.generate_summary_report(save_path=summary_path)
-        print(summary)
+        # 生成CSV交易日志
+        csv_path = strategy.generate_csv_log()
         
         return {
             'strategy': strategy,
             'results': results,
-            'excel_path': excel_path,
-            'summary_path': summary_path
+            'csv_path': csv_path
         }
     
     except Exception as e:
@@ -1008,14 +1044,11 @@ def main():
     print(f"交易品种: {', '.join(config.SYMBOLS)}")
     print(f"初始资金: ${config.INITIAL_CAPITAL:.2f}")
     
-    # 创建输出主目录
-    if not os.path.exists(config.OUTPUT_DIR):
-        os.makedirs(config.OUTPUT_DIR)
-    
     # 运行所有品种策略
     results = run_all_symbols()
     
-    print(f"\n所有策略运行完成！详细结果已保存到 {config.OUTPUT_DIR} 目录")
+    print(f"\n所有策略运行完成！")
+    print(f"CSV交易日志已保存到 log 目录")
 
 
 if __name__ == "__main__":

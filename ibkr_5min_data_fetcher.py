@@ -1,210 +1,170 @@
 """
-专门为ORB策略获取IBKR 5分钟数据
-使用配置文件中的参数设置
+增强版 IBKR 5分钟数据获取器 - 支持ATR数据完整性
+扩展获取日期范围，确保ATR指标能完整计算
 """
 
 from ib_insync import *
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 import os
 import time as time_module
-import config  # 导入配置文件
+import config
 import pytz
 from zoneinfo import ZoneInfo
 import logging
 from market_calendar import MarketCalendar
+import re
 
-class IBKR5MinDataFetcher:
+
+class Enhanced_IBKR_Fetcher:
     def __init__(self, host=config.IBKR_HOST, port=config.IBKR_PORT, client_id=config.IBKR_CLIENT_ID):
+        """初始化增强版数据获取器"""
         # 设置日志
-        self._setup_logging()
+        logging.basicConfig(level=config.LOG_LEVEL, format=config.LOG_FORMAT)
+        self.logger = logging.getLogger(__name__)
         
         # 初始化IB连接
         self.ib = IB()
         self.host = host
         self.port = port
         self.client_id = client_id
+        self.connected = False
         
         # 初始化市场日历
-        self.market_calendar = MarketCalendar(config.TIMEZONE)
-        self.ny_tz = ZoneInfo(config.TIMEZONE)
+        try:
+            self.market_calendar = MarketCalendar(config.TIMEZONE)
+            self.ny_tz = ZoneInfo(config.TIMEZONE)
+        except Exception as e:
+            self.logger.error(f"初始化市场日历失败: {e}")
+            raise
         
         # 连接到TWS
         self._connect()
-        
-    def _setup_logging(self):
-        """设置日志"""
-        logging.basicConfig(
-            level=config.LOG_LEVEL,
-            format=config.LOG_FORMAT
-        )
-        self.logger = logging.getLogger(__name__)
-        
+    
     def _connect(self):
         """连接到TWS/IB Gateway"""
         try:
             self.ib.connect(self.host, self.port, self.client_id)
+            self.connected = True
             self.logger.info("成功连接到IBKR")
         except Exception as e:
             self.logger.error(f"连接IBKR失败: {str(e)}")
             raise
-            
+    
     def get_contract(self, symbol):
         """获取合约信息"""
-        contract = Stock(symbol, 'SMART', 'USD')
-        self.ib.qualifyContracts(contract)
-        return contract
-        
-    def get_historical_data_with_retry(self, contract, end_datetime, duration, 
-                                     bar_size, use_rth):
-        """带重试机制的历史数据获取"""
-        for attempt in range(config.MAX_RETRIES):
-            try:
-                # 修改时间格式为 US/Eastern
-                if isinstance(end_datetime, str):
-                    end_datetime = pd.Timestamp(end_datetime, tz=self.ny_tz)
-                
-                # 格式化为IBKR要求的格式
-                formatted_datetime = end_datetime.strftime('%Y%m%d %H:%M:%S US/Eastern')
-                
-                bars = self.ib.reqHistoricalData(
-                    contract=contract,
-                    endDateTime=formatted_datetime,  # 使用带时区的时间格式
-                    durationStr=duration,
-                    barSizeSetting=bar_size,
-                    whatToShow='TRADES',
-                    useRTH=use_rth,
-                    formatDate=1
-                )
-                
-                # 添加检查
-                if bars is None or len(bars) == 0:
-                    self.logger.warning(f"未获取到数据，尝试次数: {attempt + 1}")
-                    if attempt < config.MAX_RETRIES - 1:
-                        time_module.sleep(config.RETRY_DELAY)
-                        continue
-                return bars
-                
-            except Exception as e:
-                self.logger.warning(f"第{attempt + 1}次获取数据失败: {str(e)}")
-                if attempt < config.MAX_RETRIES - 1:
-                    time_module.sleep(config.RETRY_DELAY)
-                else:
-                    raise
-                    
+        try:
+            contract = Stock(symbol.upper(), 'SMART', 'USD')
+            self.ib.qualifyContracts(contract)
+            return contract
+        except Exception as e:
+            self.logger.error(f"获取{symbol}合约失败: {e}")
+            raise
+    
     def get_5min_data(self, symbol, start_date, end_date, use_rth=True):
         """获取5分钟数据"""
         self.logger.info(f"获取{symbol}从{start_date}到{end_date}的5分钟数据...")
         
-        contract = self.get_contract(symbol)
-        
-        # 转换日期并确保使用正确的时区
-        start = pd.Timestamp(start_date).tz_localize(None).tz_localize(self.ny_tz)
-        end = pd.Timestamp(end_date).tz_localize(None).tz_localize(self.ny_tz)
-        
-        # 获取交易日列表
-        trading_days = self.market_calendar.get_trading_days(start, end)
-        
-        all_data = []
-        for trading_day in trading_days:
-            try:
-                # 获取市场交易时间
-                trading_day_ts = pd.Timestamp(trading_day).tz_localize(None)
-                market_open, market_close = self.market_calendar.get_trading_hours(
-                    trading_day_ts.tz_localize(self.ny_tz)
-                )
-                
-                if market_open is None:
-                    continue
+        try:
+            contract = self.get_contract(symbol)
+            
+            # 转换日期
+            start = pd.Timestamp(start_date).tz_localize(None).tz_localize(self.ny_tz)
+            end = pd.Timestamp(end_date).tz_localize(None).tz_localize(self.ny_tz)
+            
+            # 获取交易日列表
+            trading_days = self.market_calendar.get_trading_days(start, end)
+            
+            if len(trading_days) == 0:
+                self.logger.warning("指定日期范围内没有交易日")
+                return pd.DataFrame()
+            
+            all_data = []
+            for trading_day in trading_days:
+                try:
+                    # 获取市场交易时间
+                    trading_day_ts = pd.Timestamp(trading_day).tz_localize(None)
+                    market_open, market_close = self.market_calendar.get_trading_hours(
+                        trading_day_ts.tz_localize(self.ny_tz)
+                    )
                     
-                # 确保使用正确的收盘时间
-                end_time = market_close.strftime('%Y%m%d 16:00:00')
-                
-                # 获取当天数据
-                bars = self.get_historical_data_with_retry(
-                    contract=contract,
-                    end_datetime=end_time,
-                    duration='1 D',
-                    bar_size='5 mins',
-                    use_rth=use_rth
-                )
-                
-                if bars and len(bars) > 0:
-                    df = util.df(bars)
+                    if market_open is None:
+                        continue
                     
-                    # 处理时间戳
-                    df['date'] = pd.to_datetime(df['date'])
-                    if df['date'].dt.tz is None:
-                        df['date'] = df['date'].dt.tz_localize('UTC')
-                    df['date'] = df['date'].dt.tz_convert(self.ny_tz)
+                    # 请求历史数据
+                    end_time = market_close.strftime('%Y%m%d 16:00:00')
                     
-                    # 过滤交易时段数据
-                    df = df[
-                        (df['date'] >= market_open) &
-                        (df['date'] <= market_close)
-                    ]
+                    bars = self.ib.reqHistoricalData(
+                        contract=contract,
+                        endDateTime=end_time,
+                        durationStr='1 D',
+                        barSizeSetting='5 mins',
+                        whatToShow='TRADES',
+                        useRTH=use_rth,
+                        formatDate=1
+                    )
                     
-                    if not df.empty:
-                        # 添加交易日期
-                        df['tradeDate'] = df['date'].dt.date
+                    if bars and len(bars) > 0:
+                        df = util.df(bars)
                         
-                        all_data.append(df)
-                        self.logger.info(f"成功获取{len(df)}条K线数据")
-                    else:
-                        self.logger.warning(f"过滤后数据为空: {trading_day}")
-                else:
-                    self.logger.warning(f"未获取到{trading_day}的数据")
-                
-            except Exception as e:
-                self.logger.error(f"获取{trading_day}数据失败: {str(e)}")
-                
-            time_module.sleep(config.REQUEST_DELAY)
+                        # 处理时间戳
+                        df['date'] = pd.to_datetime(df['date'])
+                        if df['date'].dt.tz is None:
+                            df['date'] = df['date'].dt.tz_localize('UTC')
+                        df['date'] = df['date'].dt.tz_convert(self.ny_tz)
+                        
+                        # 过滤交易时段数据
+                        df = df[(df['date'] >= market_open) & (df['date'] <= market_close)]
+                        
+                        if not df.empty:
+                            df['tradeDate'] = df['date'].dt.date
+                            all_data.append(df)
+                            self.logger.info(f"成功获取{trading_day}: {len(df)}条K线")
+                    
+                    time_module.sleep(config.REQUEST_DELAY)
+                    
+                except Exception as e:
+                    self.logger.error(f"获取{trading_day}数据失败: {str(e)}")
+                    continue
             
-        if not all_data:
-            return pd.DataFrame()
+            if len(all_data) == 0:
+                return pd.DataFrame()
             
-        # 合并数据
-        combined_data = pd.concat(all_data)
-        combined_data = combined_data.sort_values('date')
-        
-        return combined_data
-        
+            # 合并所有数据
+            combined_data = pd.concat(all_data, ignore_index=True)
+            combined_data = combined_data.sort_values('date')
+            return combined_data
+            
+        except Exception as e:
+            self.logger.error(f"获取5分钟数据失败: {e}")
+            raise
+    
     def get_orb_data(self, symbol, start_date, end_date, use_rth=True):
         """获取ORB策略所需数据"""
         data = self.get_5min_data(symbol, start_date, end_date, use_rth)
         
         if data.empty:
             return pd.DataFrame()
-            
+        
         orb_data = []
         for date, group in data.groupby('tradeDate'):
             try:
-                # 修改这部分的时区处理
-                date_ts = pd.Timestamp(date).tz_localize(None)  # 先移除时区
+                # 时区处理
+                date_ts = pd.Timestamp(date).tz_localize(None)
                 market_open, _ = self.market_calendar.get_trading_hours(
-                    date_ts.tz_localize(self.ny_tz)  # 再添加时区
+                    date_ts.tz_localize(self.ny_tz)
                 )
                 
                 if market_open is None:
                     continue
-                    
+                
                 # 获取开盘后的数据
                 day_data = group[group['date'] >= market_open].sort_values('date')
                 
                 if len(day_data) < 2:
-                    self.logger.warning(f"{date}的有效数据少于2根K线，跳过")
                     continue
-                    
-                # 验证第一根K线时间
-                first_bar_time = day_data.iloc[0]['date']
-                if first_bar_time.time() != market_open.time():
-                    self.logger.warning(
-                        f"{date}的第一根K线时间（{first_bar_time.time()}）"
-                        f"不是开盘时间（{market_open.time()}），跳过"
-                    )
-                    continue
-                    
+                
                 # 获取前两根K线的高低点
                 orb_high = day_data.iloc[:2]['high'].max()
                 orb_low = day_data.iloc[:2]['low'].min()
@@ -225,110 +185,137 @@ class IBKR5MinDataFetcher:
             except Exception as e:
                 self.logger.error(f"处理{date}数据时出错: {str(e)}")
                 continue
-                
-        if not orb_data:
+        
+        if len(orb_data) == 0:
             return pd.DataFrame()
-            
+        
         orb_df = pd.DataFrame(orb_data)
         return orb_df
-        
-    def __enter__(self):
-        """上下文管理器入口"""
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """上下文管理器出口"""
-        self.ib.disconnect()
-        
-    def __del__(self):
-        """析构函数"""
-        if self.ib.isConnected():
-            self.ib.disconnect()
-
-    def save_data(self, data, file_path):
-        """保存数据到CSV文件"""
-        data.to_csv(file_path, index=False)
-        print(f"数据已保存至: {file_path}")
-        return file_path
-
-
-def get_symbol_5min_data(symbol, start_date=config.START_DATE, end_date=config.END_DATE, output_dir=config.DATA_DIR):
-    """获取指定股票的5分钟数据并保存"""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
     
-    fetcher = IBKR5MinDataFetcher()
+    def disconnect(self):
+        """断开连接"""
+        try:
+            if hasattr(self, 'ib') and self.ib.isConnected():
+                self.ib.disconnect()
+                self.connected = False
+                self.logger.info("已断开IBKR连接")
+        except Exception as e:
+            self.logger.error(f"断开连接时出错: {e}")
+
+
+def calculate_atr_for_orb_data(orb_df, period=14):
+    """为ORB数据计算并添加ATR指标"""
+    df = orb_df.copy()
     
+    # 确保日期排序
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values('date')
+    
+    # 计算真实波幅 (True Range)
+    df['prev_close'] = df['close'].shift(1)
+    df['tr1'] = df['high'] - df['low']
+    df['tr2'] = abs(df['high'] - df['prev_close'])
+    df['tr3'] = abs(df['low'] - df['prev_close'])
+    df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+    
+    # 计算ATR (N日平均真实波幅)
+    df['atr'] = df['tr'].rolling(window=period).mean()
+    
+    # 删除中间计算列
+    df = df.drop(['prev_close', 'tr1', 'tr2', 'tr3', 'tr'], axis=1)
+    
+    print(f"计算ATR完成，有效ATR数据行数: {df['atr'].notna().sum()}")
+    return df
+
+
+def get_symbol_5min_data_enhanced(symbol, start_date=config.START_DATE, 
+                                 end_date=config.END_DATE, output_dir=config.DATA_DIR, 
+                                 atr_period=14):
+    """增强版数据获取：扩展日期范围确保ATR数据完整"""
+    
+    fetcher = Enhanced_IBKR_Fetcher()
     try:
-        # 获取完整5分钟数据
-        full_data = fetcher.get_5min_data(symbol, start_date, end_date)
+        # 确保目录存在
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # 为了计算ATR，扩展数据获取范围
+        extended_start_date = pd.to_datetime(start_date) - pd.Timedelta(days=atr_period + 10)
+        extended_start_str = extended_start_date.strftime('%Y-%m-%d')
+        
+        print(f"为计算ATR，扩展数据获取范围: {extended_start_str} 至 {end_date}")
+        print(f"实际策略日期范围: {start_date} 至 {end_date}")
+        
+        # 获取完整5分钟数据（使用扩展的日期范围）
+        full_data = fetcher.get_5min_data(symbol, extended_start_str, end_date)
+        
         if not full_data.empty:
-            full_data_path = f"{output_dir}/{symbol}_5min_full_{start_date}_to_{end_date}.csv"
-            fetcher.save_data(full_data, full_data_path)
+            # 保存5分钟数据（使用原始日期范围命名）
+            full_filename = f"{symbol}_5min_full_{start_date}_to_{end_date}.csv"
+            full_data_path = os.path.join(output_dir, full_filename)
+            full_data.to_csv(full_data_path, index=False)
+            print(f"5分钟数据已保存: {full_data_path} ({len(full_data)}行)")
             
-            # 获取ORB策略所需数据
-            orb_data = fetcher.get_orb_data(symbol, start_date, end_date)
+            # 获取ORB策略所需数据（使用扩展的日期范围）
+            orb_data = fetcher.get_orb_data(symbol, extended_start_str, end_date)
+            
             if not orb_data.empty:
-                orb_data_path = f"{output_dir}/{symbol}_ORB_data_{start_date}_to_{end_date}.csv"
-                fetcher.save_data(orb_data, orb_data_path)
+                # 计算ATR并添加到ORB数据
+                orb_data_with_atr = calculate_atr_for_orb_data(orb_data, atr_period)
+                
+                # 保存ORB数据
+                orb_filename = f"{symbol}_ORB_data_{start_date}_to_{end_date}.csv"
+                orb_data_path = os.path.join(output_dir, orb_filename)
+                orb_data_with_atr.to_csv(orb_data_path, index=False, float_format='%.4f')
+                print(f"ORB数据已保存: {orb_data_path} ({len(orb_data_with_atr)}行)")
+                
                 return {
                     'full_data': {'success': True, 'path': full_data_path, 'rows': len(full_data)},
-                    'orb_data': {'success': True, 'path': orb_data_path, 'rows': len(orb_data)}
+                    'orb_data': {'success': True, 'path': orb_data_path, 'rows': len(orb_data_with_atr)}
                 }
         
         return {
             'full_data': {'success': False, 'error': 'No data returned'},
             'orb_data': {'success': False, 'error': 'No data returned'}
         }
-    
+        
     except Exception as e:
-        print(f"获取数据时出错: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        error_msg = f"获取数据时出错: {str(e)}"
+        print(error_msg)
         return {
-            'full_data': {'success': False, 'error': str(e)},
-            'orb_data': {'success': False, 'error': str(e)}
+            'full_data': {'success': False, 'error': error_msg},
+            'orb_data': {'success': False, 'error': error_msg}
         }
     finally:
-        del fetcher  # 确保断开连接
-
-
-def fetch_all_symbols():
-    """获取配置中所有交易品种的数据"""
-    results = {}
-    for symbol in config.SYMBOLS:
-        print(f"\n开始获取 {symbol} 数据...")
-        symbol_result = get_symbol_5min_data(symbol)
-        results[symbol] = symbol_result
-    
-    return results
+        fetcher.disconnect()
 
 
 def main():
     """主函数"""
-    print(f"开始获取数据, 时间范围: {config.START_DATE} 至 {config.END_DATE}")
-    print(f"交易品种: {', '.join(config.SYMBOLS)}")
-    
-    # 创建数据目录
-    if not os.path.exists(config.DATA_DIR):
-        os.makedirs(config.DATA_DIR)
-    
-    # 获取所有品种的数据
-    results = fetch_all_symbols()
-    
-    # 输出结果摘要
-    print("\n==== 数据获取完成 ====")
-    for symbol, result in results.items():
-        print(f"\n{symbol}:")
-        if result['full_data']['success']:
-            print(f"  完整5分钟数据: {result['full_data']['rows']}行, 保存至{result['full_data']['path']}")
-        else:
-            print(f"  完整5分钟数据获取失败: {result['full_data']['error']}")
+    try:
+        print(f"开始获取增强版数据, 时间范围: {config.START_DATE} 至 {config.END_DATE}")
+        print(f"交易品种: {', '.join(config.SYMBOLS)}")
         
-        if result['orb_data']['success']:
-            print(f"  ORB策略数据: {result['orb_data']['rows']}行, 保存至{result['orb_data']['path']}")
-        else:
-            print(f"  ORB策略数据获取失败: {result['orb_data']['error']}")
+        # 获取所有品种的数据
+        for symbol in config.SYMBOLS:
+            print(f"\n开始获取 {symbol} 数据...")
+            result = get_symbol_5min_data_enhanced(symbol)
+            
+            print(f"\n{symbol} 结果:")
+            if result['full_data']['success']:
+                print(f"  5分钟数据: {result['full_data']['rows']}行")
+            else:
+                print(f"  5分钟数据失败: {result['full_data']['error']}")
+            
+            if result['orb_data']['success']:
+                print(f"  ORB数据: {result['orb_data']['rows']}行")
+            else:
+                print(f"  ORB数据失败: {result['orb_data']['error']}")
+        
+    except Exception as e:
+        print(f"程序执行失败: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

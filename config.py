@@ -4,8 +4,8 @@ ORB策略回测配置文件
 
 # 基本回测参数
 SYMBOLS = ['TQQQ']  # 交易品种列表，可设置多个股票进行回测
-START_DATE = '2025-01-01'  # 回测开始日期
-END_DATE = '2025-04-11'    # 回测结束日期
+START_DATE = '2024-01-01'  # 回测开始日期
+END_DATE = '2025-05-23'    # 回测结束日期
 INITIAL_CAPITAL = 25000    # 初始资金
 
 # 策略参数
@@ -17,7 +17,7 @@ TAKE_PROFIT_R = 10             # 止盈目标 (风险的倍数)
 # IBKR连接参数
 IBKR_HOST = '127.0.0.1'        # IBKR服务器地址
 IBKR_PORT = 7497               # IBKR端口 (7497为模拟账户, 7496为实盘账户)
-IBKR_CLIENT_ID = 10            # 客户端ID
+IBKR_CLIENT_ID = 1            # 客户端ID
 
 # 数据和输出设置
 DATA_DIR = 'data'              # 数据存储目录
